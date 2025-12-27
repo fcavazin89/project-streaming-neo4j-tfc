@@ -1,0 +1,78 @@
+Modelagem de Dados em Grafos para um Serviço de Streaming no Neo4j
+
+Vamos criar um modelo de grafos para representar um serviço de streaming (como Netflix ou Spotify) usando o Neo4j. A modelagem focará em entidades como usuários, conteúdos (filmes, séries, músicas), categorias, artistas, e os relacionamentos entre eles.
+
+Entidades Principais (Nós)
+User (Usuário)
+Propriedades: userId, name, email, subscriptionType, joinDate
+Content (Conteúdo)
+Propriedades: contentId, title, releaseYear, duration, type (ex: "movie", "series", "song")
+Genre (Gênero)
+Propriedades: genreId, name (ex: "Ação", "Comédia")
+Artist (Artista/Diretor/Ator)
+Propriedades: artistId, name, role (ex: "director", "actor", "singer")
+Episode (Episódio, para séries)
+Propriedades: episodeId, title, seasonNumber, episodeNumber
+Relacionamentos (Edges)
+(:User)-[:WATCHED {timestamp, rating}]->(:Content)
+Um usuário assistiu a um conteúdo, com metadados como data e avaliação.
+(:Content)-[:BELONGS_TO]->(:Genre)
+Um conteúdo pertence a um gênero (ex: "Stranger Things" → "Ficção Científica").
+(:Artist)-[:PARTICIPATED_IN {role}]->(:Content)
+Um artista participou de um conteúdo (ex: diretor atuou em um filme).
+(:Content)-[:HAS_EPISODE]->(:Episode)
+Uma série possui episódios (ex: "Stranger Things" tem o episódio "Chapter One").
+(:User)-[:FOLLOWS]->(:Artist)
+Um usuário segue um artista favorito.
+(:User)-[:ADDED_TO_PLAYLIST]->(:Content)
+Um usuário adicionou um conteúdo a uma playlist pessoal.
+
+
+
+// Primeiro criar todos os nós
+CREATE (u1:User {userId: "U1", name: "Ana", subscriptionType: "premium", joinDate: date()})
+CREATE (c1:Content {contentId: "C1", title: "Stranger Things", type: "series", releaseYear: 2016})
+CREATE (g1:Genre {genreId: "G1", name: "Ficção Científica"})
+CREATE (a1:Artist {artistId: "A1", name: "Millie Bobby Brown", role: "actor"})
+CREATE (e1:Episode {episodeId: "E1", title: "Chapter One", seasonNumber: 1, episodeNumber: 1});
+
+// Depois criar os relacionamentos
+MATCH (u:User {userId: "U1"}), (c:Content {contentId: "C1"})
+CREATE (u)-[:WATCHED {timestamp: datetime(), rating: 5}]->(c);
+
+MATCH (c:Content {contentId: "C1"}), (g:Genre {genreId: "G1"})
+CREATE (c)-[:BELONGS_TO]->(g);
+
+MATCH (a:Artist {artistId: "A1"}), (c:Content {contentId: "C1"})
+CREATE (a)-[:PARTICIPATED_IN {role: "actor"}]->(c);
+
+MATCH (c:Content {contentId: "C1"}), (e:Episode {episodeId: "E1"})
+CREATE (c)-[:HAS_EPISODE]->(e);
+
+
+1. Recomendações baseadas em gênero:
+MATCH (u:User {userId: "U1"})-[:WATCHED]->(c:Content)-[:BELONGS_TO]->(g:Genre)
+WITH u, g
+MATCH (rec:Content)-[:BELONGS_TO]->(g)
+WHERE NOT (u)-[:WATCHED]->(rec)
+RETURN rec.title AS Recommendation, g.name AS Genre
+LIMIT 10;
+2. Artistas mais populares:
+MATCH (u:User)-[:WATCHED]->(c:Content)<-[:PARTICIPATED_IN]-(a:Artist)
+RETURN a.name AS Artist, COUNT(u) AS Views
+ORDER BY Views DESC 
+LIMIT 10;
+3. Episódios assistidos por um usuário:
+MATCH (u:User {userId: "U1"})-[:WATCHED]->(c:Content)-[:HAS_EPISODE]->(e:Episode)
+RETURN c.title AS Series, e.title AS Episode, e.seasonNumber AS Season, e.episodeNumber AS EpisodeNumber;
+
+Vantagens do Modelo de Grafos
+Flexibilidade: Relacionamentos complexos (ex: usuários seguindo artistas) são representados naturalmente.
+Consultas Rápidas: Recomendações e padrões de consumo são eficientes com traversals.
+Escalabilidade: Ideal para dados interconectados típicos de plataformas de streaming.
+Este modelo pode ser expandido para incluir recursos como playlists, reviews, ou dispositivos de streaming.
+
+
+
+
+
