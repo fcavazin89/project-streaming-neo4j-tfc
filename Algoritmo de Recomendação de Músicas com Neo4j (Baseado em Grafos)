@@ -1,0 +1,148 @@
+### **Algoritmo de Recomendação de Músicas com Neo4j (Baseado em Grafos)**  
+Este algoritmo combina **filtragem colaborativa** e **recomendação baseada em conteúdo** usando a estrutura de grafos do Neo4j. Inclui tratamento para *cold start* e exemplos de consultas Cypher/GDS.
+
+---
+
+#### **1. Modelo de Dados no Neo4j**  
+Estrutura básica de nós e relacionamentos:  
+```cypher
+// Nós
+CREATE (:User {id: "user123", name: "Alice"});
+CREATE (:Song {id: "song456", title: "Midnight Memories"});
+CREATE (:Artist {id: "artist789", name: "Taylor Echo"});
+CREATE (:Genre {id: "genre001", name: "Pop"});
+
+// Relacionamentos com propriedades
+MATCH (u:User {id: "user123"}), (s:Song {id: "song456"})
+CREATE (u)-[:LISTENED_TO {count: 5, lastListen: datetime("2026-01-03T12:00:00")}]->(s);
+
+MATCH (s:Song {id: "song456"}), (a:Artist {id: "artist789"})
+CREATE (s)-[:CREATED_BY]->(a);
+
+MATCH (s:Song {id: "song456"}), (g:Genre {id: "genre001"})
+CREATE (s)-[:BELONGS_TO]->(g);
+```
+
+---
+
+#### **2. Estratégias de Recomendação**  
+##### **A. Filtragem Colaborativa (Usuários Similares)**  
+Encontra usuários com gostos similares e recomenda músicas que eles ouviram, mas o usuário-alvo não.  
+**Exemplo com GDS (Node Similarity):**  
+```cypher
+// Projeta grafo para análise
+CALL gds.graph.project(
+  "collabGraph",
+  ["User", "Song"],
+  { LISTENED_TO: { properties: "count" } }
+);
+
+// Calcula similaridade entre usuários
+CALL gds.nodeSimilarity.stream("collabGraph", {
+  similarityCutoff: 0.1,
+  topK: 10
+})
+YIELD node1, node2, similarity
+WHERE gds.util.asNode(node1).id = "user123"
+WITH gds.util.asNode(node2) AS similarUser, similarity
+MATCH (similarUser)-[r:LISTENED_TO]->(s:Song)
+WHERE NOT (gds.util.asNode(node1))-[:LISTENED_TO]->(s)
+RETURN s.title AS recommendation, SUM(r.count * similarity) AS score
+ORDER BY score DESC
+LIMIT 10;
+```
+
+##### **B. Baseado em Conteúdo (Gênero/Artista)**  
+Recomenda músicas do mesmo gênero ou artista das músicas já ouvidas pelo usuário.  
+**Exemplo em Cypher:**  
+```cypher
+MATCH (u:User {id: "user123"})-[l:LISTENED_TO]->(s:Song)-[:BELONGS_TO]->(g:Genre)
+WITH u, g, SUM(l.count) AS genreAffinity
+ORDER BY genreAffinity DESC
+LIMIT 3 // Top 3 gêneros
+
+MATCH (g)<-[:BELONGS_TO]-(rec:Song)
+WHERE NOT (u)-[:LISTENED_TO]->(rec)
+RETURN rec.title AS recommendation, genreAffinity AS score
+ORDER BY score DESC
+LIMIT 10;
+```
+
+##### **C. Abordagem Híbrida (Combinação Ponderada)**  
+Combina scores de filtragem colaborativa e conteúdo:  
+```cypher
+// Score colaborativo (exemplo simplificado)
+MATCH (u:User {id: "user123"})-[t:LISTENED_TO]->(s:Song)<-[r:LISTENED_TO]-(similar:User)
+WITH similar, SUM(t.count * r.count) AS collabScore
+MATCH (similar)-[:LISTENED_TO]->(rec:Song)
+WHERE NOT (u)-[:LISTENED_TO]->(rec)
+
+// Score baseado em conteúdo
+WITH rec, collabScore
+MATCH (rec)-[:BELONGS_TO]->(g:Genre)<-[:BELONGS_TO]-(liked:Song)<-[:LISTENED_TO]-(u)
+WITH rec, collabScore, COUNT(liked) AS contentScore
+
+// Combina scores (70% colaborativo, 30% conteúdo)
+RETURN rec.title AS recommendation, 
+       (collabScore * 0.7 + contentScore * 0.3) AS hybridScore
+ORDER BY hybridScore DESC
+LIMIT 10;
+```
+
+---
+
+#### **3. Tratamento de Cold Start**  
+Para usuários novos sem histórico de escuta:  
+```cypher
+// Recomenda músicas populares
+MATCH (s:Song)<-[l:LISTENED_TO]-(u:User)
+RETURN s.title AS recommendation, SUM(l.count) AS popularity
+ORDER BY popularity DESC
+LIMIT 10;
+
+// Ou recomenda baseado em artistas/genres explícitos (se disponível)
+MATCH (u:User {id: "new_user"})-[:FOLLOWS]->(a:Artist)-[:CREATED]->(s:Song)
+RETURN s.title AS recommendation;
+```
+
+---
+
+#### **4. Passos para Implementação**  
+1. **Importação de Dados:**  
+   - Carregue usuários, músicas, artistas e gêneros via CSV/JSON usando `LOAD CSV` ou APIs.  
+   - Registre interações (ex.: `LISTENED_TO`) com contagens e timestamps.
+
+2. **Configuração do GDS (Graph Data Science Library):**  
+   - Instale o plugin GDS para algoritmos otimizados (Node Similarity, PageRank).  
+   - Projete subgrafos para análise (ex.: `collabGraph`).
+
+3. **Consulta em Tempo Real:**  
+   - Para um usuário-alvo, execute as consultas acima conforme o contexto (com/sim histórico).  
+   - Combine resultados de múltiplas estratégias com pesos ajustáveis.
+
+4. **Atualização Contínua:**  
+   - Atualize o grafo com novas interações em tempo real ou por lotes.  
+   - Reexecute algoritmos do GDS periodicamente para manter recomendações relevantes.
+
+---
+
+#### **5. Otimizações**  
+- **Cache:** Armazene recomendações frequentes em Redis ou no próprio Neo4j.  
+- **Personalized PageRank:** Use o GDS para ranquear músicas com base na proximidade do usuário no grafo:  
+  ```cypher
+  CALL gds.pageRank.stream("musicGraph", {
+    maxIterations: 20,
+    sourceNodes: [gds.util.asNode("user123")]
+  })
+  YIELD nodeId, score
+  WITH gds.util.asNode(nodeId) AS song, score
+  WHERE song:Song AND NOT (:User {id: "user123"})-[:LISTENED_TO]->(song)
+  RETURN song.title, score
+  ORDER BY score DESC
+  LIMIT 10;
+  ```
+- **Ponderação por Tempo:** Dê mais peso a músicas ouvidas recentemente usando `lastListen`.
+
+---
+
+**Resultado:** Um sistema flexível que adapta recomendações conforme o comportamento do usuário, combinando a riqueza de relacionamentos do Neo4j com técnicas clássicas de machine learning. 🎵🚀
