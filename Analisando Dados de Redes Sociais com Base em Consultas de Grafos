@@ -1,0 +1,207 @@
+### **Analisando Dados de Redes Sociais com Consultas de Grafos no Neo4j**  
+Este guia prático demonstra como modelar, consultar e extrair insights de redes sociais usando grafos. Foco em **identificação de influenciadores**, **detecção de comunidades** e **análise de propagação de conteúdo**.
+
+---
+
+#### **1. Modelo de Dados para Redes Sociais**  
+Estrutura de nós e relacionamentos no Neo4j:  
+```cypher
+// Nós principais
+CREATE (:User {id: "u1", name: "Ana", joinDate: date("2025-01-15")});
+CREATE (:Post {id: "p1", content: "Viagem ao Japão ✈️", timestamp: datetime("2026-01-03T09:30:00")});
+CREATE (:Hashtag {name: "Travel"});
+CREATE (:Location {name: "Tóquio"});
+
+// Relacionamentos com contexto
+MATCH (u:User {id: "u1"}), (p:Post {id: "p1"})
+CREATE (u)-[:POSTED {device: "mobile"}]->(p);
+
+MATCH (p:Post {id: "p1"}), (h:Hashtag {name: "Travel"})
+CREATE (p)-[:TAGGED]->(h);
+
+MATCH (u2:User {id: "u2"}), (p:Post {id: "p1"})
+CREATE (u2)-[:LIKED {timestamp: datetime("2026-01-03T10:15:00")}]->(p);
+
+MATCH (u3:User {id: "u3"}), (p:Post {id: "p1"})
+CREATE (u3)-[:COMMENTED {text: "Incrível!"}]->(p);
+
+MATCH (p:Post {id: "p1"}), (l:Location {name: "Tóquio"})
+CREATE (p)-[:LOCATED_AT]->(l);
+```
+
+**Esquema Visual:**  
+```
+[User] -[:POSTED]-> [Post] -[:TAGGED]-> [Hashtag]
+   |        |
+   |        -[:LOCATED_AT]-> [Location]
+   |
+   -[:LIKED/COMMENTED]-> [Post]
+```
+
+---
+
+#### **2. Consultas Essenciais para Análise**  
+##### **A. Identificando Influenciadores (PageRank)**  
+Encontre usuários com maior impacto na rede usando o algoritmo PageRank do GDS:  
+```cypher
+// Projeta grafo para análise de influência
+CALL gds.graph.project(
+  "socialInfluence",
+  "User",
+  { 
+    POSTED: {orientation: "REVERSE"}, // Inverte para: Post -> Influencia User
+    LIKED: {aggregation: "COUNT"},
+    COMMENTED: {aggregation: "COUNT"}
+  },
+  { relationshipProperties: "*" }
+);
+
+// Executa PageRank
+CALL gds.pageRank.stream("socialInfluence", {
+  maxIterations: 20,
+  dampingFactor: 0.85
+})
+YIELD nodeId, score
+RETURN gds.util.asNode(nodeId).name AS user, score AS influenceScore
+ORDER BY influenceScore DESC
+LIMIT 10;
+```
+
+##### **B. Detecção de Comunidades (Label Propagation)**  
+Descubra grupos orgânicos de usuários com interesses similares:  
+```cypher
+CALL gds.labelPropagation.stream("socialGraph", {
+  relationshipWeightProperty: "count" // Ex: peso = número de interações
+})
+YIELD nodeId, communityId
+WITH communityId, COLLECT(gds.util.asNode(nodeId).name) AS members
+WHERE SIZE(members) > 5 // Filtra comunidades pequenas
+RETURN communityId, members, SIZE(members) AS size
+ORDER BY size DESC;
+```
+
+##### **C. Análise de Propagação de Conteúdo**  
+Rastreie como um post viral se espalhou pela rede:  
+```cypher
+MATCH (source:Post {id: "p1"})
+CALL gds.shortestPath.dijkstra.stream("socialGraph", {
+  sourceNode: source,
+  targetNode: gds.util.asNode("u100"), // Usuário final
+  relationshipWeightProperty: "timestamp" // Peso = tempo de interação
+})
+YIELD path
+RETURN [n IN nodes(path) | n.name] AS propagationPath,
+       LENGTH(path) AS steps;
+```
+
+##### **D. Identificando Conteúdo Tendência**  
+Encontre hashtags relacionadas a partir de padrões de uso:  
+```cypher
+MATCH (h1:Hashtag {name: "Travel"})<-[:TAGGED]-(p:Post)-[:TAGGED]->(h2:Hashtag)
+WHERE h1 <> h2
+WITH h2, COUNT(*) AS coOccurrences
+RETURN h2.name AS relatedHashtag, coOccurrences
+ORDER BY coOccurrences DESC
+LIMIT 5;
+```
+
+---
+
+#### **3. Insights Avançados com Cypher**  
+##### **A. Engajamento por Tipo de Dispositivo**  
+```cypher
+MATCH (u:User)-[r:POSTED]->(p:Post)
+WITH r.device AS device, 
+     COUNT(p) AS posts,
+     AVG(SIZE[(p)<-[:LIKED]-() | 1])) AS avgLikes
+RETURN device, posts, avgLikes
+ORDER BY avgLikes DESC;
+```
+
+##### **B. Detecção de Comportamento Suspeito (Fraude)**  
+Identifique usuários com padrões anômalos:  
+```cypher
+MATCH (u:User)-[r:LIKED]->(p:Post)
+WITH u, COUNT(DISTINCT p) AS uniquePosts, COUNT(r) AS totalLikes
+WHERE totalLikes > 100 AND uniquePosts < 5 // Muitos likes em poucos posts
+RETURN u.name AS suspiciousUser, totalLikes, uniquePosts;
+```
+
+##### **C. Análise Temporal de Atividade**  
+Descubra horários de pico de engajamento:  
+```cypher
+MATCH (u:User)-[r:COMMENTED]->(p:Post)
+WITH datetime(r.timestamp).hour AS hour, COUNT(*) AS comments
+RETURN hour, comments
+ORDER BY comments DESC
+LIMIT 3; // Ex: Horas com mais comentários
+```
+
+---
+
+#### **4. Workflow Completo de Análise**  
+1. **Ingestão de Dados**  
+   - Importe dados de APIs (Twitter, Facebook) via `LOAD CSV` ou drivers (Python/Neo4j):  
+     ```python
+     from neo4j import GraphDatabase
+     driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "senha"))
+     with driver.session() as session:
+         session.run("""
+             UNWIND $tweets AS tweet
+             MERGE (u:User {id: tweet.user_id})
+             CREATE (p:Post {id: tweet.id, text: tweet.text})
+             CREATE (u)-[:POSTED]->(p)
+         """, tweets=dataset)
+     ```
+
+2. **Pré-processamento**  
+   - Crie índices para performance:  
+     ```cypher
+     CREATE INDEX user_id_index FOR (u:User) ON (u.id);
+     CREATE INDEX post_timestamp_index FOR (p:Post) ON (p.timestamp);
+     ```
+
+3. **Execução de Algoritmos**  
+   - Use o **Neo4j GDS Library** para:  
+     - PageRank (influência)
+     - Louvain (comunidades otimizadas)
+     - Similarity (recomendação de conexões)
+
+4. **Visualização**  
+   - **Neo4j Browser**: Use `:play start` para visualizações interativas  
+   - **Ferramentas Externas**:  
+     - Neo4j Bloom (visualização business-friendly)  
+     - Integração com Python (Pyvis, NetworkX)  
+       ```python
+       from pyvis.network import Network
+       net = Network()
+       # Adicione nós/arestas a partir de resultados do Neo4j
+       net.show("social_graph.html")
+       ```
+
+---
+
+#### **5. Casos de Uso Reais**  
+- **Marketing**: Identifique micro-influenciadores em comunidades específicas para campanhas segmentadas.  
+- **Segurança**: Detecte bots analisando padrões de interação (ex: 100 likes em 2 minutos).  
+- **Conteúdo**: Recomende hashtags relacionadas com base em comunidades coesas.  
+- **Gestão de Crises**: Rastreie a propagação de postagens negativas usando `shortestPath`.
+
+---
+
+#### **6. Otimizações Críticas**  
+- **Escalabilidade**:  
+  - Use `gds.graph.project.cypher` para subgrafos direcionados (ex: apenas últimos 30 dias).  
+  - Particione dados por região/data usando labels compostos (ex: `:User:BR`).  
+- **Performance**:  
+  - Evite `MATCH (n)` sem filtros – sempre restrinja com labels.  
+  - Use `apoc.periodic.iterate` para operações em massa.  
+- **Contexto Temporal**:  
+  ```cypher
+  // Análise de engajamento nos últimos 7 dias
+  MATCH (u:User)-[r:LIKED]->(p:Post)
+  WHERE r.timestamp > datetime() - duration("P7D")
+  RETURN u.name, COUNT(*) AS weeklyLikes;
+  ```
+
+> **Resultado Final**: Um sistema que transforma dados brutos de redes sociais em insights acionáveis, revelando estruturas ocultas (comunidades), atores-chave (influenciadores) e dinâmicas de comportamento (propagação de conteúdo) através da lente dos grafos. ✨
